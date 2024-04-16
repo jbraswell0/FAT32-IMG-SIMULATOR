@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+
 typedef struct {
     unsigned short bytesPerSector;
     unsigned char sectorsPerCluster;
@@ -15,6 +16,28 @@ typedef struct {
     unsigned int sectorsPerFAT;
     unsigned long long sizeOfImage; // Calculated from file size
 } BootSectorInfo;
+
+typedef struct {
+	unsigned int currentCluster; //Current directory
+	char path[512]; //Full path of cd
+} DirectoryContext;
+
+DirectoryContext currentDirectory;
+
+void changeDirectory(const char* dirName) {
+    if (strcmp(dirName, ".") == 0) return; // Current directory, no change
+
+    if (strcmp(dirName, "..") == 0) {
+        // Logic to move to parent directory, update currentDirectory
+        return;
+    }
+
+    // Find dirName in the current directory's entries
+    // If found and is a directory:
+    //     Update currentDirectory to new cluster and path
+    // Else:
+    printf("Error: Directory not found or is not a directory\n");
+}
 
 void printBootSectorInfo(const char *imagePath) {
     int fd = open(imagePath, O_RDONLY);
@@ -56,6 +79,7 @@ void printBootSectorInfo(const char *imagePath) {
     close(fd);
 }
 
+
 int main(int argc, char *argv[]) {
     if (argc != 2) {
         printf("Usage: ./filesys [FAT32 ISO]\n");
@@ -77,7 +101,13 @@ int main(int argc, char *argv[]) {
             break;
         } else if (strcmp(command, "info") == 0) {
             printBootSectorInfo(imagePath);
-        }
+        } else if (strcmp(command, "cd") == 0) {
+    	    char dirName[256];
+    	    sscanf(command, "cd %s", dirName); // Simplified; needs more robust parsing
+    	    changeDirectory(dirName);
+	} else if (strcmp(command, "ls") == 0) {
+    	   // listDirectory();
+	}
         // Implement other commands here
     }
 
