@@ -55,22 +55,42 @@ bool readCluster(int fd, unsigned int clusterNum, unsigned char* buffer, BootSec
 }
 
 void changeDirectory(int fd, const char* dirName, DirectoryContext* context, BootSectorInfo* bsi) {
-    if (strcmp(dirName, ".") == 0) {
-        return; // No change needed if it's the current directory
-    }
-
-    if (strcmp(dirName, "..") == 0) {
-        // Logic to move to the parent directory would go here
-        // This is simplified; actual implementation would need to track and parse paths
+    unsigned char* buffer = malloc(bsi->bytesPerSector * bsi->sectorsPerCluster);
+    if (!buffer) {
+        printf("Failed to allocate memory for reading cluster\n");
         return;
     }
 
-    // Placeholder for reading and changing directory based on 'dirName'
-    // You would typically read the current directory's cluster here
-    printf("Attempt to change to directory: %s\n", dirName);
-    // You would also update context->currentCluster and context->path appropriately here
-}
+    if (!readCluster(fd, context->currentCluster, buffer, bsi)) {
+        free(buffer);
+        return;
+    }
 
+    DirEntry* entry = (DirEntry*)buffer;
+    int entriesCount = (bsi->bytesPerSector * bsi->sectorsPerCluster) / sizeof(DirEntry);
+    bool found = false;
+
+    for (int i = 0; i < entriesCount; i++, entry++) {
+        if (entry->name[0] == 0x00) break; // End of directory entries
+        if (entry->name[0] == 0xE5) continue; // Skipped deleted entry
+
+        // Check if the entry is a directory and the name matches
+        if ((entry->attr & ATTR_DIRECTORY) && strncmp(entry->name, dirName, 11) == 0) {
+            unsigned int newCluster = (entry->firstClusterHigh << 16) | entry->firstClusterLow;
+            if (newCluster == 0) newCluster = bsi->rootCluster; // In FAT32, root can be represented as 0
+            context->currentCluster = newCluster;
+            snprintf(context->path, sizeof(context->path), "%s/%s", context->path, dirName);
+            found = true;
+            break;
+        }
+    }
+
+    if (!found) {
+        printf("Directory not found: %s\n", dirName);
+    }
+
+    free(buffer);
+}
 void printBootSectorInfo(const char *imagePath) {
     int fd = open(imagePath, O_RDONLY);
     if (fd < 0) {
@@ -141,6 +161,49 @@ void listDirectory(int fd, DirectoryContext* context, BootSectorInfo* bsi) {
     free(buffer);
 }
 
+void createDirectory(int fd, const char* dirName, DirectoryContext* context, BootSectorInfo* bsi) {
+    unsigned char* buffer = malloc(bsi->bytesPerSector * bsi->sectorsPerCluster);
+    if (!buffer) {
+        printf("Failed to allocate memory for directory cluster\n");
+        return;
+    }
+
+    if (!readCluster(fd, context->currentCluster, buffer, bsi)) {
+        free(buffer);
+        return;
+    }
+
+    DirEntry* entries = (DirEntry*) buffer;
+    int numEntries = (bsi->bytesPerSector * bsi->sectorsPerCluster) / sizeof(DirEntry);
+    bool foundSpace = false;
+
+    for (int i = 0; i < numEntries; i++) {
+        if (entries[i].name[0] == 0x00 || entries[i].name[0] == 0xE5) { // Free entry found
+            // Initialize the directory entry for new directory
+            memset(&entries[i], 0, sizeof(DirEntry));
+            strncpy(entries[i].name, dirName, 11); // Simple case, not handling long file names
+            entries[i].attr = ATTR_DIRECTORY;
+            entries[i].firstClusterLow = context->currentCluster & 0xFFFF; // Placeholder for new cluster
+            entries[i].firstClusterHigh = (context->currentCluster >> 16) & 0xFFFF;
+            entries[i].fileSize = 0; // Directory size is always zero
+
+            foundSpace = true;
+            break;
+        }
+    }
+
+    //if (!foundSpace) {
+        //printf("No space in current directory to create new directory\n");
+    //} 
+	//else {
+        // Write back the modified cluster to the disk
+        lseek(fd, (context->currentCluster - 2) * bsi->sectorsPerCluster * bsi->bytesPerSector, SEEK_SET);
+        write(fd, buffer, bsi->bytesPerSector * bsi->sectorsPerCluster);
+    //}
+
+    free(buffer);
+}
+
 
 int main(int argc, char *argv[]) {
     if (argc != 2) {
@@ -179,7 +242,11 @@ int main(int argc, char *argv[]) {
             //changeDirectory(fd, dirName, &context, &bsi);
         } else if (strcmp(command, "ls") == 0) {
             listDirectory(fd, &context, &bsi);
-        } else {
+        } else if (strncmp(command, "mkdir ", 6) == 0) {
+    	    char dirName[256];
+    	    sscanf(command + 6, "%255s", dirName); // Extract directory name from command
+    	    createDirectory(fd, dirName, &context, &bsi);
+	} else {
             printf("Unknown command\n");
         }
     }
