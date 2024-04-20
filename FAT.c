@@ -56,8 +56,11 @@ bool readCluster(int fd, unsigned int clusterNum, unsigned char* buffer, BootSec
 }
 
 void changeDirectory(int fd, const char* dirName, DirectoryContext* context, BootSectorInfo* bsi) {
-    if (strcmp(dirName, ".") == 0) return; // Stay in the current directory
-    
+    if (strcmp(dirName, ".") == 0) {
+        printf("Staying in the current directory.\n");
+        return; // Stay in the current directory
+    }
+
     unsigned char* buffer = malloc(bsi->bytesPerSector * bsi->sectorsPerCluster);
     if (!buffer) {
         printf("Failed to allocate memory for reading cluster\n");
@@ -74,16 +77,42 @@ void changeDirectory(int fd, const char* dirName, DirectoryContext* context, Boo
     bool found = false;
 
     for (int i = 0; i < entriesCount; i++, entry++) {
-        if (entry->name[0] == 0x00) break; // End of directory entries
-        if (entry->name[0] == 0xE5) continue; // Skip deleted entry
+        if (entry->name[0] == 0x00) {
+            printf("Reached end of directory entries.\n");
+            break; // End of directory entries
+        }
+        if ((unsigned char)entry->name[0] == 0xE5) {
+            printf("Skipped a deleted entry.\n");
+            continue; // Skip deleted entry
+        }
 
-        // Check for '.' or '..' directories
-        if (strcmp(dirName, "..") == 0 && strncmp(entry->name, "..         ", 11) == 0) {
-            found = true;  // Handle parent directory logic here
-        } else if ((entry->attr & ATTR_DIRECTORY) && strncmp(entry->name, dirName, 11) == 0) {
-            context->currentCluster = (entry->firstClusterHigh << 16) | entry->firstClusterLow;
-            snprintf(context->path, sizeof(context->path), "%s/%s", context->path, dirName);
+        // Convert space-padded name to a null-terminated string for comparison
+        char formattedName[12];
+        strncpy(formattedName, entry->name, 11);
+        formattedName[11] = '\0';  // Ensure null-termination for safe comparison
+
+        // Trim trailing spaces for accurate comparison
+        for (int j = 10; j >= 0; j--) {
+            if (formattedName[j] == ' ') formattedName[j] = '\0';
+            else break;
+        }
+
+        if ((entry->attr & ATTR_DIRECTORY) && strcmp(formattedName, dirName) == 0) {
+            unsigned int newCluster = (entry->firstClusterHigh << 16) | entry->firstClusterLow;
+            if (newCluster == 0) newCluster = bsi->rootCluster;
+
+            char newPath[512];
+            if (snprintf(newPath, sizeof(newPath), "%s/%s", context->path, dirName) >= (int)sizeof(newPath)) {
+                printf("Error: New path too long\n");
+                free(buffer);
+                return;
+            }
+            strncpy(context->path, newPath, sizeof(context->path));
+            context->path[sizeof(context->path) - 1] = '\0'; // Ensure null-termination
+
+            context->currentCluster = newCluster;
             found = true;
+            printf("Changed directory to %s\n", dirName);
             break;
         }
     }
@@ -94,7 +123,6 @@ void changeDirectory(int fd, const char* dirName, DirectoryContext* context, Boo
 
     free(buffer);
 }
-
 
 void printBootSectorInfo(const char *imagePath) {
     int fd = open(imagePath, O_RDONLY);
@@ -154,7 +182,7 @@ void listDirectory(int fd, DirectoryContext* context, BootSectorInfo* bsi) {
 
     for (int i = 0; i < entriesCount; i++, entry++) {
         if (entry->name[0] == 0x00) break; // End of the directory entries
-        if (entry->name[0] == 0xE5) continue; // Skip deleted entries
+        if ((unsigned char)entry->name[0] == 0xE5) continue; // Skip deleted entries
 
         printf("%.11s\n", entry->name); // Print the entry name if it's not deleted
     }
@@ -179,12 +207,13 @@ void createDirectory(int fd, const char* dirName, DirectoryContext* context, Boo
     bool foundSpace = false;
 
     for (int i = 0; i < numEntries; i++) {
-        if (entries[i].name[0] == 0x00 || entries[i].name[0] == 0xE5) { // Free entry found
+        if (entries[i].name[0] == 0x00 || (unsigned char)entries[i].name[0] == 0xE5) { // Free entry found
+            memset(&entries[i], 0, sizeof(DirEntry)); // Clear the entry to prepare it for new directory
             strncpy(entries[i].name, dirName, 11); // Format name to FAT32 8.3 standard
             entries[i].attr = ATTR_DIRECTORY;
-            entries[i].firstClusterLow = context->currentCluster & 0xFFFF;
-            entries[i].firstClusterHigh = (context->currentCluster >> 16) & 0xFFFF;
-            entries[i].fileSize = 0;
+            entries[i].firstClusterLow = (unsigned short)(context->currentCluster & 0xFFFF); // Placeholder for new cluster, typically allocate new cluster here
+            entries[i].firstClusterHigh = (unsigned short)((context->currentCluster >> 16) & 0xFFFF);
+            entries[i].fileSize = 0; // Directory size is always zero
 
             foundSpace = true;
             break;
@@ -194,32 +223,53 @@ void createDirectory(int fd, const char* dirName, DirectoryContext* context, Boo
     if (!foundSpace) {
         printf("No space in current directory to create new directory\n");
     } else {
-        lseek(fd, context->currentCluster * bsi->bytesPerSector * bsi->sectorsPerCluster, SEEK_SET);
-        write(fd, buffer, bsi->bytesPerSector * bsi->sectorsPerCluster);
+        off_t offset = (context->currentCluster - 2) * bsi->sectorsPerCluster * bsi->bytesPerSector + bsi->rootCluster * bsi->bytesPerSector;
+        if (lseek(fd, offset, SEEK_SET) < 0) {
+            perror("Error seeking to write new directory entry");
+        } else if (write(fd, buffer, bsi->bytesPerSector * bsi->sectorsPerCluster) < 0) {
+            perror("Error writing new directory entry");
+        } else {
+            printf("Directory created successfully\n");
+        }
     }
 
     free(buffer);
 }
-
 int main(int argc, char *argv[]) {
     if (argc != 2) {
         printf("Usage: ./filesys [FAT32 ISO]\n");
         return 1;
     }
 
-    int fd = open(argv[1], O_RDONLY);
+    int fd = open(argv[1], O_RDWR);
     if (fd == -1) {
         perror("Error opening file");
         return 1;
     }
 
-    BootSectorInfo bsi; // This will be initialized by reading the boot sector
-    DirectoryContext context = {0, "/", ""}; // Initialize the context
+    // Read the boot sector to initialize the BootSectorInfo
+    unsigned char bootSector[512];
+    if (read(fd, bootSector, sizeof(bootSector)) != sizeof(bootSector)) {
+        perror("Failed to read boot sector");
+        close(fd);
+        return 1;
+    }
+
+    BootSectorInfo bsi = {
+        .bytesPerSector = *(unsigned short *)(bootSector + 11),
+        .sectorsPerCluster = *(bootSector + 13),
+        .rootCluster = *(unsigned int *)(bootSector + 44),
+        .sectorsPerFAT = *(unsigned int *)(bootSector + 36),
+        .sizeOfImage = lseek(fd, 0, SEEK_END) // Fetch the size of the image by seeking to the end
+    };
+    bsi.totalClusters = (bsi.sizeOfImage / (bsi.sectorsPerCluster * bsi.bytesPerSector));
+
+    lseek(fd, 0, SEEK_SET); // Reset the file descriptor position for further operations
+
+    DirectoryContext context = {2, "/", ""}; // Initialize the context
     strncpy(context.imageName, argv[1], sizeof(context.imageName) - 1); // Store the image file name
+    context.imageName[sizeof(context.imageName) - 1] = '\0'; // Ensure null-termination
 
-    context.currentCluster = 2; // Typically the root directory, but should be set based on actual data
-
-    // Other initializations and function calls...
     char command[256];
     while (1) {
         printf("[%s%s]/> ", context.imageName, context.path); // Display both image name and path
@@ -235,19 +285,18 @@ int main(int argc, char *argv[]) {
         } else if (strncmp(command, "cd ", 3) == 0) {
             char dirName[256];
             sscanf(command + 3, "%s", dirName); // Assuming directory names don't contain spaces
-            //changeDirectory(fd, dirName, &context, &bsi);
+            changeDirectory(fd, dirName, &context, &bsi);
         } else if (strcmp(command, "ls") == 0) {
             listDirectory(fd, &context, &bsi);
         } else if (strncmp(command, "mkdir ", 6) == 0) {
-    	    char dirName[256];
-    	    sscanf(command + 6, "%255s", dirName); // Extract directory name from command
-    	    createDirectory(fd, dirName, &context, &bsi);
-	} else {
+            char dirName[256];
+            sscanf(command + 6, "%255s", dirName); // Extract directory name from command
+            createDirectory(fd, dirName, &context, &bsi);
+        } else {
             printf("Unknown command\n");
         }
     }
 
     close(fd);
-
     return 0;
 }
