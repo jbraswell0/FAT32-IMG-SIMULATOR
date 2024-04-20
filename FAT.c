@@ -258,6 +258,129 @@ void createDirectory(int fd, const char* dirName, DirectoryContext* context, Boo
 
     free(buffer);
 }
+
+void createFile(int fd, const char* fileName, DirectoryContext* context, BootSectorInfo* bsi) {
+    unsigned char* buffer = malloc(bsi->bytesPerSector * bsi->sectorsPerCluster);
+    if (!buffer) {
+        printf("Failed to allocate memory for directory cluster\n");
+        return;
+    }
+
+    // Read the cluster where the current directory resides
+    if (!readCluster(fd, context->currentCluster, buffer, bsi)) {
+        free(buffer);
+        return;
+    }
+
+    DirEntry* entries = (DirEntry*) buffer;
+    int numEntries = (bsi->bytesPerSector * bsi->sectorsPerCluster) / sizeof(DirEntry);
+    bool foundSpace = false;
+    bool exists = false;
+
+    for (int i = 0; i < numEntries; i++) {
+        if (entries[i].name[0] == 0x00 || (unsigned char)entries[i].name[0] == 0xE5) {
+            if (!foundSpace) {
+                foundSpace = true;
+                memset(&entries[i], 0, sizeof(DirEntry)); // Clear the entry to prepare it for new file
+                strncpy(entries[i].name, fileName, 11); // Format name to FAT32 8.3 standard
+                entries[i].attr = 0x00; // Normal file attribute
+                entries[i].firstClusterLow = 0; // No cluster allocated for 0 byte file
+                entries[i].firstClusterHigh = 0;
+                entries[i].fileSize = 0; // File size is zero bytes
+            }
+        } else {
+            char formattedName[12];
+            strncpy(formattedName, entries[i].name, 11);
+            formattedName[11] = '\0';
+
+            for (int j = 10; j >= 0; j--) {
+                if (formattedName[j] == ' ') formattedName[j] = '\0';
+                else break;
+            }
+
+            if (strcmp(formattedName, fileName) == 0) {
+                printf("Error: A file or directory with this name already exists.\n");
+                exists = true;
+                break;
+            }
+        }
+    }
+
+    if (foundSpace && !exists) {
+        // Calculate the offset where this directory's data begins in the disk image
+        unsigned long long sector = ((context->currentCluster - 2) * bsi->sectorsPerCluster) + bsi->rootCluster;
+        off_t offset = sector * bsi->bytesPerSector;
+
+        if (lseek(fd, offset, SEEK_SET) < 0) {
+            perror("Error seeking to write new file entry");
+        } else if (write(fd, buffer, bsi->bytesPerSector * bsi->sectorsPerCluster) < 0) {
+            perror("Error writing new file entry");
+        } else {
+            printf("File created successfully\n");
+        }
+    }
+
+    free(buffer);
+}
+
+void removeFile(int fd, const char* fileName, DirectoryContext* context, BootSectorInfo* bsi) {
+    unsigned char* buffer = malloc(bsi->bytesPerSector * bsi->sectorsPerCluster);
+    if (!buffer) {
+        printf("Failed to allocate memory for directory cluster\n");
+        return;
+    }
+
+    if (!readCluster(fd, context->currentCluster, buffer, bsi)) {
+        free(buffer);
+        return;
+    }
+
+    DirEntry* entries = (DirEntry*) buffer;
+    int numEntries = (bsi->bytesPerSector * bsi->sectorsPerCluster) / sizeof(DirEntry);
+    bool fileFound = false;
+
+    for (int i = 0; i < numEntries; i++) {
+        if (entries[i].name[0] == 0x00) {
+            break; // End of directory entries
+        }
+
+        if ((unsigned char)entries[i].name[0] == 0xE5) {
+            continue; // Skip deleted entries
+        }
+
+        char formattedName[12];
+        strncpy(formattedName, entries[i].name, 11);
+        formattedName[11] = '\0';
+
+        // Remove trailing spaces from filename for comparison
+        for (int j = 10; j >= 0; j--) {
+            if (formattedName[j] == ' ') formattedName[j] = '\0';
+            else break;
+        }
+
+        if (strcmp(formattedName, fileName) == 0) {
+            entries[i].name[0] = 0xE5; // Mark the entry as deleted
+            fileFound = true;
+            break;
+        }
+    }
+
+    if (fileFound) {
+        off_t offset = (context->currentCluster - 2) * bsi->sectorsPerCluster * bsi->bytesPerSector + bsi->rootCluster * bsi->bytesPerSector;
+        if (lseek(fd, offset, SEEK_SET) < 0) {
+            perror("Error seeking to update directory entry");
+        } else if (write(fd, buffer, bsi->bytesPerSector * bsi->sectorsPerCluster) < 0) {
+            perror("Error writing updated directory entry");
+        } else {
+            printf("File removed successfully\n");
+        }
+    } else {
+        printf("Error: File not found.\n");
+    }
+
+    free(buffer);
+}
+
 int main(int argc, char *argv[]) {
     if (argc != 2) {
         printf("Usage: ./filesys [FAT32 ISO]\n");
@@ -315,6 +438,14 @@ int main(int argc, char *argv[]) {
             char dirName[256];
             sscanf(command + 6, "%255s", dirName); // Extract directory name from command
             createDirectory(fd, dirName, &context, &bsi);
+        } else if (strncmp(command, "creat ", 6) == 0){
+            char filename[256];
+            sscanf(command + 6, "%255s", filename);
+            createFile(fd, filename, &context, &bsi);
+        } else if (strncmp(command, "rm ", 3) == 0) {
+            char filename[256];
+            sscanf(command + 3, "%255s", filename);
+            removeFile(fd, filename, &context, &bsi);
         } else {
             printf("Unknown command\n");
         }
