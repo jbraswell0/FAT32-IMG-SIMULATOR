@@ -21,8 +21,9 @@ typedef struct {
 } BootSectorInfo;
 
 typedef struct {
-	unsigned int currentCluster; //Current directory
-	char path[512]; //Full path of cd
+    unsigned int currentCluster; // Current directory cluster
+    char path[512]; // Full path of the current directory
+    char imageName[256]; // Name of the image file
 } DirectoryContext;
 
 DirectoryContext currentDirectory;
@@ -55,6 +56,8 @@ bool readCluster(int fd, unsigned int clusterNum, unsigned char* buffer, BootSec
 }
 
 void changeDirectory(int fd, const char* dirName, DirectoryContext* context, BootSectorInfo* bsi) {
+    if (strcmp(dirName, ".") == 0) return; // Stay in the current directory
+    
     unsigned char* buffer = malloc(bsi->bytesPerSector * bsi->sectorsPerCluster);
     if (!buffer) {
         printf("Failed to allocate memory for reading cluster\n");
@@ -72,13 +75,13 @@ void changeDirectory(int fd, const char* dirName, DirectoryContext* context, Boo
 
     for (int i = 0; i < entriesCount; i++, entry++) {
         if (entry->name[0] == 0x00) break; // End of directory entries
-        if (entry->name[0] == 0xE5) continue; // Skipped deleted entry
+        if (entry->name[0] == 0xE5) continue; // Skip deleted entry
 
-        // Check if the entry is a directory and the name matches
-        if ((entry->attr & ATTR_DIRECTORY) && strncmp(entry->name, dirName, 11) == 0) {
-            unsigned int newCluster = (entry->firstClusterHigh << 16) | entry->firstClusterLow;
-            if (newCluster == 0) newCluster = bsi->rootCluster; // In FAT32, root can be represented as 0
-            context->currentCluster = newCluster;
+        // Check for '.' or '..' directories
+        if (strcmp(dirName, "..") == 0 && strncmp(entry->name, "..         ", 11) == 0) {
+            found = true;  // Handle parent directory logic here
+        } else if ((entry->attr & ATTR_DIRECTORY) && strncmp(entry->name, dirName, 11) == 0) {
+            context->currentCluster = (entry->firstClusterHigh << 16) | entry->firstClusterLow;
             snprintf(context->path, sizeof(context->path), "%s/%s", context->path, dirName);
             found = true;
             break;
@@ -91,6 +94,8 @@ void changeDirectory(int fd, const char* dirName, DirectoryContext* context, Boo
 
     free(buffer);
 }
+
+
 void printBootSectorInfo(const char *imagePath) {
     int fd = open(imagePath, O_RDONLY);
     if (fd < 0) {
@@ -145,17 +150,13 @@ void listDirectory(int fd, DirectoryContext* context, BootSectorInfo* bsi) {
 
     DirEntry* entry = (DirEntry*) buffer;
     int entriesCount = (bsi->bytesPerSector * bsi->sectorsPerCluster) / DIR_ENTRY_SIZE;
+    printf(".\n..\n"); // Always list '.' and '..'
 
     for (int i = 0; i < entriesCount; i++, entry++) {
-        if (entry->name[0] == 0x00) { // End of the directory entries
-            break;
-        }
-        if (entry->name[0] == 0xE5) { // Entry is free (deleted file)
-            continue;
-        }
+        if (entry->name[0] == 0x00) break; // End of the directory entries
+        if (entry->name[0] == 0xE5) continue; // Skip deleted entries
 
-        // Print the entry name if it's not deleted
-        printf("%.11s\n", entry->name);
+        printf("%.11s\n", entry->name); // Print the entry name if it's not deleted
     }
 
     free(buffer);
@@ -179,31 +180,26 @@ void createDirectory(int fd, const char* dirName, DirectoryContext* context, Boo
 
     for (int i = 0; i < numEntries; i++) {
         if (entries[i].name[0] == 0x00 || entries[i].name[0] == 0xE5) { // Free entry found
-            // Initialize the directory entry for new directory
-            memset(&entries[i], 0, sizeof(DirEntry));
-            strncpy(entries[i].name, dirName, 11); // Simple case, not handling long file names
+            strncpy(entries[i].name, dirName, 11); // Format name to FAT32 8.3 standard
             entries[i].attr = ATTR_DIRECTORY;
-            entries[i].firstClusterLow = context->currentCluster & 0xFFFF; // Placeholder for new cluster
+            entries[i].firstClusterLow = context->currentCluster & 0xFFFF;
             entries[i].firstClusterHigh = (context->currentCluster >> 16) & 0xFFFF;
-            entries[i].fileSize = 0; // Directory size is always zero
+            entries[i].fileSize = 0;
 
             foundSpace = true;
             break;
         }
     }
 
-    //if (!foundSpace) {
-        //printf("No space in current directory to create new directory\n");
-    //} 
-	//else {
-        // Write back the modified cluster to the disk
-        lseek(fd, (context->currentCluster - 2) * bsi->sectorsPerCluster * bsi->bytesPerSector, SEEK_SET);
+    if (!foundSpace) {
+        printf("No space in current directory to create new directory\n");
+    } else {
+        lseek(fd, context->currentCluster * bsi->bytesPerSector * bsi->sectorsPerCluster, SEEK_SET);
         write(fd, buffer, bsi->bytesPerSector * bsi->sectorsPerCluster);
-    //}
+    }
 
     free(buffer);
 }
-
 
 int main(int argc, char *argv[]) {
     if (argc != 2) {
@@ -211,25 +207,25 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-	int fd = open(argv[1], O_RDONLY);
-    	if (fd == -1) {
-        	perror("Error opening file");
-        	return 1;
-    	}
+    int fd = open(argv[1], O_RDONLY);
+    if (fd == -1) {
+        perror("Error opening file");
+        return 1;
+    }
 
-// Initialize boot sector info and directory context
-    BootSectorInfo bsi; // This needs to be properly initialized, perhaps with another function
-    DirectoryContext context = {0, ""};
+    BootSectorInfo bsi; // This will be initialized by reading the boot sector
+    DirectoryContext context = {0, "/", ""}; // Initialize the context
+    strncpy(context.imageName, argv[1], sizeof(context.imageName) - 1); // Store the image file name
+
     context.currentCluster = 2; // Typically the root directory, but should be set based on actual data
-    strcpy(context.path, "/"); // Root path initialization
 
+    // Other initializations and function calls...
     char command[256];
     while (1) {
-        printf("[%s]/> ", context.path);
+        printf("[%s%s]/> ", context.imageName, context.path); // Display both image name and path
         if (!fgets(command, sizeof(command), stdin)) {
             break; // Exit on EOF
         }
-
         command[strcspn(command, "\n")] = 0; // Remove newline character
 
         if (strcmp(command, "exit") == 0) {
