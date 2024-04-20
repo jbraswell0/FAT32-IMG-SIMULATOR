@@ -385,6 +385,99 @@ void removeFile(int fd, const char* fileName, DirectoryContext* context, BootSec
     free(buffer);
 }
 
+void removeDirectory(int fd, const char* dirName, DirectoryContext* context, BootSectorInfo* bsi) {
+    if (strcmp(dirName, ".") == 0 || strcmp(dirName, "..") == 0) {
+        printf("Error: Cannot remove '.' or '..'\n");
+        return;
+    }
+
+    unsigned char* buffer = malloc(bsi->bytesPerSector * bsi->sectorsPerCluster);
+    if (!buffer) {
+        printf("Failed to allocate memory for directory cluster\n");
+        return;
+    }
+
+    if (!readCluster(fd, context->currentCluster, buffer, bsi)) {
+        free(buffer);
+        return;
+    }
+
+    DirEntry* entries = (DirEntry*)buffer;
+    int numEntries = (bsi->bytesPerSector * bsi->sectorsPerCluster) / sizeof(DirEntry);
+    bool found = false;
+    bool isEmpty = true;
+
+    // First pass: check existence and emptiness
+    for (int i = 0; i < numEntries; i++) {
+        if (entries[i].name[0] == 0x00) {
+            break; // End of directory entries
+        }
+        if ((unsigned char)entries[i].name[0] == 0xE5) {
+            continue; // Skip deleted entries
+        }
+
+        char formattedName[12];
+        strncpy(formattedName, entries[i].name, 11);
+        formattedName[11] = '\0';
+
+        // Remove trailing spaces from filename for comparison
+        for (int j = 10; j >= 0; j--) {
+            if (formattedName[j] == ' ') formattedName[j] = '\0';
+            else break;
+        }
+
+        if (strcmp(formattedName, dirName) == 0 && (entries[i].attr & ATTR_DIRECTORY)) {
+            found = true;
+
+            // Check if the directory is empty by attempting to read its cluster
+            unsigned int dirCluster = (entries[i].firstClusterHigh << 16) | entries[i].firstClusterLow;
+            unsigned char* dirBuffer = malloc(bsi->bytesPerSector * bsi->sectorsPerCluster);
+            if (!dirBuffer || !readCluster(fd, dirCluster, dirBuffer, bsi)) {
+                isEmpty = false; // Assume not empty if we fail to read
+            } else {
+                DirEntry* dirEntries = (DirEntry*)dirBuffer;
+                for (int j = 0; j < numEntries; j++) {
+                    if (dirEntries[j].name[0] == 0x00) {
+                        break; // End of directory entries
+                    }
+                    if ((unsigned char)dirEntries[j].name[0] == 0xE5) {
+                        continue; // Skip deleted entries
+                    }
+                    if (j > 1) { // More than just '.' and '..'
+                        isEmpty = false;
+                        break;
+                    }
+                }
+            }
+            free(dirBuffer);
+
+            if (isEmpty) {
+                entries[i].name[0] = 0xE5; // Mark the directory as deleted
+            }
+            break;
+        }
+    }
+
+    if (!found) {
+        printf("Error: Directory not found.\n");
+    } else if (!isEmpty) {
+        printf("Error: Directory is not empty or could not be read.\n");
+    } else {
+        // Write back the updated buffer to the current directory's cluster
+        off_t offset = ((context->currentCluster - 2) * bsi->sectorsPerCluster + bsi->rootCluster) * bsi->bytesPerSector;
+        if (lseek(fd, offset, SEEK_SET) < 0) {
+            perror("Error seeking to update directory");
+        } else if (write(fd, buffer, bsi->bytesPerSector * bsi->sectorsPerCluster) < 0) {
+            perror("Error writing updated directory");
+        } else {
+            printf("Directory removed successfully\n");
+        }
+    }
+
+    free(buffer);
+}
+
+
 int main(int argc, char *argv[]) {
     if (argc != 2) {
         printf("Usage: ./filesys [FAT32 ISO]\n");
@@ -442,7 +535,7 @@ int main(int argc, char *argv[]) {
             char dirName[256];
             sscanf(command + 6, "%255s", dirName); // Extract directory name from command
             createDirectory(fd, dirName, &context, &bsi);
-        } else if (strncmp(command, "creat ", 6) == 0){
+        } else if (strncmp(command, "creat ", 6) == 0) {
             char filename[256];
             sscanf(command + 6, "%255s", filename);
             createFile(fd, filename, &context, &bsi);
@@ -450,6 +543,10 @@ int main(int argc, char *argv[]) {
             char filename[256];
             sscanf(command + 3, "%255s", filename);
             removeFile(fd, filename, &context, &bsi);
+        } else if (strncmp(command, "rmdir ", 6) == 0) {
+            char dirName[256];
+            sscanf(command + 6, "%255s", dirName);
+            removeDirectory(fd, dirName, &context, &bsi);
         } else {
             printf("Unknown command\n");
         }
