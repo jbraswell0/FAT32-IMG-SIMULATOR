@@ -61,6 +61,31 @@ void changeDirectory(int fd, const char* dirName, DirectoryContext* context, Boo
         return; // Stay in the current directory
     }
 
+    if (strcmp(dirName, "..") == 0) {
+        // Handle moving to the parent directory
+        if (strcmp(context->path, "/") == 0) {
+            printf("Already at root directory.\n");
+            return; // Cannot go above root directory
+        }
+
+        // Remove the last directory from the path
+        char* lastSlash = strrchr(context->path, '/');
+        if (lastSlash != NULL) {
+            if (lastSlash == context->path) {
+                // If the last slash is the beginning of the path, then we're moving back to root
+                *(lastSlash + 1) = '\0'; // Keep the root slash only
+            } else {
+                *lastSlash = '\0'; // Cut the path at the last slash
+            }
+        }
+
+        // Assuming parent directory is root for now; should dynamically find the actual parent cluster
+        context->currentCluster = bsi->rootCluster;
+        printf("Changed directory to parent: %s\n", context->path);
+        return;
+    }
+
+    // Allocate buffer for reading directory entries
     unsigned char* buffer = malloc(bsi->bytesPerSector * bsi->sectorsPerCluster);
     if (!buffer) {
         printf("Failed to allocate memory for reading cluster\n");
@@ -86,12 +111,10 @@ void changeDirectory(int fd, const char* dirName, DirectoryContext* context, Boo
             continue; // Skip deleted entry
         }
 
-        // Convert space-padded name to a null-terminated string for comparison
         char formattedName[12];
         strncpy(formattedName, entry->name, 11);
-        formattedName[11] = '\0';  // Ensure null-termination for safe comparison
+        formattedName[11] = '\0';
 
-        // Trim trailing spaces for accurate comparison
         for (int j = 10; j >= 0; j--) {
             if (formattedName[j] == ' ') formattedName[j] = '\0';
             else break;
@@ -99,7 +122,7 @@ void changeDirectory(int fd, const char* dirName, DirectoryContext* context, Boo
 
         if ((entry->attr & ATTR_DIRECTORY) && strcmp(formattedName, dirName) == 0) {
             unsigned int newCluster = (entry->firstClusterHigh << 16) | entry->firstClusterLow;
-            if (newCluster == 0) newCluster = bsi->rootCluster;
+            if (newCluster == 0) newCluster = bsi->rootCluster; 
 
             char newPath[512];
             if (snprintf(newPath, sizeof(newPath), "%s/%s", context->path, dirName) >= (int)sizeof(newPath)) {
@@ -108,7 +131,7 @@ void changeDirectory(int fd, const char* dirName, DirectoryContext* context, Boo
                 return;
             }
             strncpy(context->path, newPath, sizeof(context->path));
-            context->path[sizeof(context->path) - 1] = '\0'; // Ensure null-termination
+            context->path[sizeof(context->path) - 1] = '\0'; 
 
             context->currentCluster = newCluster;
             found = true;
