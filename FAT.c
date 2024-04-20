@@ -234,8 +234,11 @@ void createDirectory(int fd, const char* dirName, DirectoryContext* context, Boo
             memset(&entries[i], 0, sizeof(DirEntry)); // Clear the entry to prepare it for new directory
             strncpy(entries[i].name, dirName, 11); // Format name to FAT32 8.3 standard
             entries[i].attr = ATTR_DIRECTORY;
-            entries[i].firstClusterLow = (unsigned short)(context->currentCluster & 0xFFFF); // Placeholder for new cluster, typically allocate new cluster here
-            entries[i].firstClusterHigh = (unsigned short)((context->currentCluster >> 16) & 0xFFFF);
+
+            // Assign a new cluster for the directory, different from the current one
+            // If your simulation tracks free clusters, assign one from the free list
+            entries[i].firstClusterLow = context->currentCluster + 1; // Simplified example; ensure this doesn't overlap real data
+            entries[i].firstClusterHigh = 0;
             entries[i].fileSize = 0; // Directory size is always zero
 
             foundSpace = true;
@@ -322,6 +325,7 @@ void createFile(int fd, const char* fileName, DirectoryContext* context, BootSec
 
     free(buffer);
 }
+
 
 void removeFile(int fd, const char* fileName, DirectoryContext* context, BootSectorInfo* bsi) {
     unsigned char* buffer = malloc(bsi->bytesPerSector * bsi->sectorsPerCluster);
