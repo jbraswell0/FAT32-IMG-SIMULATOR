@@ -36,11 +36,13 @@ rmdir - Jared
 Files:
 
 - FAT.c
-- FAT.o
 - Makefile
 - README.md
 
 Running the FAT32 image program: Navigate to the folder holding FAT.c and the Makefile. 
 Run the 'make' command in the terminal. This will create the executable called 'filesys'. Now run './filesys fat32.img' and this will load the image.
 
+Bugs:
+
+Currently, the writeFile function does not work. You can execute the command, but it will always fail. 
 
