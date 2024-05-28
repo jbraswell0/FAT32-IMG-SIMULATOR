@@ -10,28 +10,30 @@
 
 #define DIR_ENTRY_SIZE 32
 #define ATTR_DIRECTORY 0x10
-#define MAX_OPEN_FILES 10  // Maximum number of open files
+#define MAX_OPEN_FILES 10 
 
-
+//bootsector struct
 typedef struct {
     unsigned short bytesPerSector;
     unsigned char sectorsPerCluster;
     unsigned int rootCluster;
-    unsigned int totalClusters; // Calculated based on the image size and sectors per cluster
+    unsigned int totalClusters; 
     unsigned int sectorsPerFAT;
-    unsigned long long sizeOfImage; // Calculated from file size
+    unsigned long long sizeOfImage; 
 } BootSectorInfo;
 
 unsigned int getNextCluster(int fd, unsigned int currentCluster, BootSectorInfo* bsi);
 
+//struct that contains the current cluster, the name  and the name of the image
 typedef struct {
-    unsigned int currentCluster; // Current directory cluster
-    char path[512]; // Full path of the current directory
-    char imageName[256]; // Name of the image file
+    unsigned int currentCluster; 
+    char path[512]; 
+    char imageName[256]; 
 } DirectoryContext;
 
 DirectoryContext currentDirectory;
 
+//struct to determine the number of entries a sector can hold
 typedef struct {
     char name[11];
     uint8_t attr;
@@ -41,28 +43,30 @@ typedef struct {
     uint32_t fileSize;
 } DirEntry;
 
+//struct to handle file opening
+//flags determine operation to carry out based on command input
 typedef struct {
-    char fileName[12];    // File name (considering 8.3 format)
-    int flags;            // 0 for read, 1 for write, 2 for read/write
-    unsigned long offset; // Offset within the file
-    unsigned int cluster; // Starting cluster of the file
-    unsigned int size;    // Size of the file in bytes
-    bool isOpen;          // Is file currently open
+    char fileName[12];    
+    int flags;            
+    unsigned long offset; 
+    unsigned int cluster; 
+    unsigned int size;    
+    bool isOpen;          
 } OpenFile;
 
-OpenFile openFiles[MAX_OPEN_FILES];  // Array to store open files
+OpenFile openFiles[MAX_OPEN_FILES];  //aqrray to store open files
 
-
+//read data from a cluster and load it into memory buffer
 bool readCluster(int fd, unsigned int clusterNum, unsigned char* buffer, BootSectorInfo* bsi) {
-    // Convert cluster number to sector number
     unsigned long long sector = ((clusterNum - 2) * bsi->sectorsPerCluster) + bsi->rootCluster;
     off_t offset = sector * bsi->bytesPerSector;
 
+    //seek to the cluster
     if (lseek(fd, offset, SEEK_SET) < 0) {
         perror("Error seeking cluster");
         return false;
     }
-
+    //read the cluster
     if (read(fd, buffer, bsi->bytesPerSector * bsi->sectorsPerCluster) < 0) {
         perror("Error reading cluster");
         return false;
@@ -71,62 +75,65 @@ bool readCluster(int fd, unsigned int clusterNum, unsigned char* buffer, BootSec
     return true;
 }
 
+//fucntion to handle the cd command
 void changeDirectory(int fd, const char* dirName, DirectoryContext* context, BootSectorInfo* bsi) {
     if (strcmp(dirName, ".") == 0) {
         printf("Staying in the current directory.\n");
-        return; // Stay in the current directory
+        return; 
     }
 
     if (strcmp(dirName, "..") == 0) {
-        // Handle moving to the parent directory
         if (strcmp(context->path, "/") == 0) {
-            printf("Already at root directory.\n");
-            return; // Cannot go above root directory
+            printf("Already in the root directory.\n");
+            return; 
         }
 
-        // Remove the last directory from the path
+        //check for and handle slash in input
         char* lastSlash = strrchr(context->path, '/');
         if (lastSlash != NULL) {
             if (lastSlash == context->path) {
-                // If the last slash is the beginning of the path, then we're moving back to root
-                *(lastSlash + 1) = '\0'; // Keep the root slash only
+                *(lastSlash + 1) = '\0'; 
             } else {
-                *lastSlash = '\0'; // Cut the path at the last slash
+                *lastSlash = '\0';
             }
         }
 
-        // Assuming parent directory is root for now; should dynamically find the actual parent cluster
         context->currentCluster = bsi->rootCluster;
         printf("Changed directory to parent: %s\n", context->path);
         return;
     }
 
-    // Allocate buffer for reading directory entries
+    //allocate memory for reeading cluster
     unsigned char* buffer = malloc(bsi->bytesPerSector * bsi->sectorsPerCluster);
     if (!buffer) {
-        printf("Failed to allocate memory for reading cluster\n");
+        printf("Failed to allocate memory\n");
         return;
     }
 
+    //if you cannot read from the cluster, free the buffer and exit the fucntion
     if (!readCluster(fd, context->currentCluster, buffer, bsi)) {
         free(buffer);
         return;
     }
 
+    //initialize entry pointer
     DirEntry* entry = (DirEntry*)buffer;
     int entriesCount = (bsi->bytesPerSector * bsi->sectorsPerCluster) / sizeof(DirEntry);
     bool found = false;
 
+    //loop through direectory entries
     for (int i = 0; i < entriesCount; i++, entry++) {
+        //error handling
         if (entry->name[0] == 0x00) {
             printf("Reached end of directory entries.\n");
-            break; // End of directory entries
+            break; 
         }
         if ((unsigned char)entry->name[0] == 0xE5) {
             printf("Skipped a deleted entry.\n");
-            continue; // Skip deleted entry
+            continue; 
         }
 
+        //format the name of the directory
         char formattedName[12];
         strncpy(formattedName, entry->name, 11);
         formattedName[11] = '\0';
@@ -140,6 +147,7 @@ void changeDirectory(int fd, const char* dirName, DirectoryContext* context, Boo
             unsigned int newCluster = (entry->firstClusterHigh << 16) | entry->firstClusterLow;
             if (newCluster == 0) newCluster = bsi->rootCluster; 
 
+            //update the path and the current cluster
             char newPath[512];
             if (snprintf(newPath, sizeof(newPath), "%s/%s", context->path, dirName) >= (int)sizeof(newPath)) {
                 printf("Error: New path too long\n");
@@ -156,6 +164,7 @@ void changeDirectory(int fd, const char* dirName, DirectoryContext* context, Boo
         }
     }
 
+    //if directory is not found, print error message 
     if (!found) {
         printf("Directory not found: %s\n", dirName);
     }
@@ -163,13 +172,16 @@ void changeDirectory(int fd, const char* dirName, DirectoryContext* context, Boo
     free(buffer);
 }
 
+//info function
 void printBootSectorInfo(const char *imagePath) {
+    //open the image with correct permissions
     int fd = open(imagePath, O_RDONLY);
     if (fd < 0) {
         perror("Failed to open image file");
         return;
     }
 
+    //read the boot sector and print an error message if failed
     unsigned char bootSector[512];
     if (read(fd, bootSector, sizeof(bootSector)) != sizeof(bootSector)) {
         perror("Failed to read boot sector");
@@ -177,6 +189,7 @@ void printBootSectorInfo(const char *imagePath) {
         return;
     }
 
+    //print the size of the image file
     struct stat st;
     if (fstat(fd, &st) != 0) {
         perror("Failed to get image file size");
@@ -184,6 +197,7 @@ void printBootSectorInfo(const char *imagePath) {
         return;
     }
 
+    //populate all values for an instance of BootSectorInfo
     BootSectorInfo info = {
         .bytesPerSector = *(unsigned short *)(bootSector + 11),
         .sectorsPerCluster = *(bootSector + 13),
@@ -193,6 +207,7 @@ void printBootSectorInfo(const char *imagePath) {
     };
     info.totalClusters = (st.st_size / (info.sectorsPerCluster * info.bytesPerSector));
 
+    //print all data values
     printf("Bytes Per Sector: %u\n", info.bytesPerSector);
     printf("Sectors Per Cluster: %u\n", info.sectorsPerCluster);
     printf("Root Cluster: %u\n", info.rootCluster);
@@ -203,39 +218,42 @@ void printBootSectorInfo(const char *imagePath) {
     close(fd);
 }
 
+//fucntion to handle ls command
 void listDirectory(int fd, DirectoryContext* context, BootSectorInfo* bsi) {
+    //like all functions, allocate memeory to read from the cluster
     unsigned char* buffer = malloc(bsi->bytesPerSector * bsi->sectorsPerCluster);
     if (!buffer) {
         printf("Failed to allocate memory for reading cluster\n");
         return;
     }
-
+    //if failed, clear the buffer and exit
     if (!readCluster(fd, context->currentCluster, buffer, bsi)) {
         free(buffer);
         return;
     }
 
+    //initialize entry buffer and print '.' and '..'
     DirEntry* entry = (DirEntry*) buffer;
     int entriesCount = (bsi->bytesPerSector * bsi->sectorsPerCluster) / DIR_ENTRY_SIZE;
-    printf(".\n..\n"); // Always list '.' and '..'
+    printf(".\n..\n"); 
 
+    //print all entries unless it was deleted
     for (int i = 0; i < entriesCount; i++, entry++) {
-        if (entry->name[0] == 0x00) break; // End of the directory entries
-        if ((unsigned char)entry->name[0] == 0xE5) continue; // Skip deleted entries
+        if (entry->name[0] == 0x00) break; 
+        if ((unsigned char)entry->name[0] == 0xE5) continue;
 
-        printf("%.11s\n", entry->name); // Print the entry name if it's not deleted
+        printf("%.11s\n", entry->name); 
     }
-
     free(buffer);
 }
 
+//function to handle mkdir 
 void createDirectory(int fd, const char* dirName, DirectoryContext* context, BootSectorInfo* bsi) {
     unsigned char* buffer = malloc(bsi->bytesPerSector * bsi->sectorsPerCluster);
     if (!buffer) {
         printf("Failed to allocate memory for directory cluster\n");
         return;
     }
-
     if (!readCluster(fd, context->currentCluster, buffer, bsi)) {
         free(buffer);
         return;
@@ -245,23 +263,24 @@ void createDirectory(int fd, const char* dirName, DirectoryContext* context, Boo
     int numEntries = (bsi->bytesPerSector * bsi->sectorsPerCluster) / sizeof(DirEntry);
     bool foundSpace = false;
 
+    //search for a free entry
     for (int i = 0; i < numEntries; i++) {
-        if (entries[i].name[0] == 0x00 || (unsigned char)entries[i].name[0] == 0xE5) { // Free entry found
-            memset(&entries[i], 0, sizeof(DirEntry)); // Clear the entry to prepare it for new directory
-            strncpy(entries[i].name, dirName, 11); // Format name to FAT32 8.3 standard
+        if (entries[i].name[0] == 0x00 || (unsigned char)entries[i].name[0] == 0xE5) { 
+            memset(&entries[i], 0, sizeof(DirEntry)); 
+            strncpy(entries[i].name, dirName, 11); 
             entries[i].attr = ATTR_DIRECTORY;
 
-            // Assign a new cluster for the directory, different from the current one
-            // If your simulation tracks free clusters, assign one from the free list
-            entries[i].firstClusterLow = context->currentCluster + 1; // Simplified example; ensure this doesn't overlap real data
+            // Assign a new cluster for the directory different from the current one
+            entries[i].firstClusterLow = context->currentCluster + 1; 
             entries[i].firstClusterHigh = 0;
-            entries[i].fileSize = 0; // Directory size is always zero
+            entries[i].fileSize = 0; 
 
             foundSpace = true;
             break;
         }
     }
 
+    //if the directory is full, print error. if it is created successfully, print a success message
     if (!foundSpace) {
         printf("No space in current directory to create new directory\n");
     } else {
@@ -278,14 +297,13 @@ void createDirectory(int fd, const char* dirName, DirectoryContext* context, Boo
     free(buffer);
 }
 
+//function to handle the creation of the file
 void createFile(int fd, const char* fileName, DirectoryContext* context, BootSectorInfo* bsi) {
     unsigned char* buffer = malloc(bsi->bytesPerSector * bsi->sectorsPerCluster);
     if (!buffer) {
         printf("Failed to allocate memory for directory cluster\n");
         return;
     }
-
-    // Read the cluster where the current directory resides
     if (!readCluster(fd, context->currentCluster, buffer, bsi)) {
         free(buffer);
         return;
@@ -296,16 +314,17 @@ void createFile(int fd, const char* fileName, DirectoryContext* context, BootSec
     bool foundSpace = false;
     bool exists = false;
 
+    //search for a free entry, similar to mkdir
     for (int i = 0; i < numEntries; i++) {
         if (entries[i].name[0] == 0x00 || (unsigned char)entries[i].name[0] == 0xE5) {
             if (!foundSpace) {
                 foundSpace = true;
-                memset(&entries[i], 0, sizeof(DirEntry)); // Clear the entry to prepare it for new file
-                strncpy(entries[i].name, fileName, 11); // Format name to FAT32 8.3 standard
-                entries[i].attr = 0x00; // Normal file attribute
-                entries[i].firstClusterLow = 0; // No cluster allocated for 0 byte file
+                memset(&entries[i], 0, sizeof(DirEntry)); 
+                strncpy(entries[i].name, fileName, 11); 
+                entries[i].attr = 0x00; //file attribute
+                entries[i].firstClusterLow = 0; 
                 entries[i].firstClusterHigh = 0;
-                entries[i].fileSize = 0; // File size is zero bytes
+                entries[i].fileSize = 0; 
             }
         } else {
             char formattedName[12];
@@ -325,11 +344,10 @@ void createFile(int fd, const char* fileName, DirectoryContext* context, BootSec
         }
     }
 
+    //Calculate the offset where this directory's data begins in the disk image
     if (foundSpace && !exists) {
-        // Calculate the offset where this directory's data begins in the disk image
         unsigned long long sector = ((context->currentCluster - 2) * bsi->sectorsPerCluster) + bsi->rootCluster;
         off_t offset = sector * bsi->bytesPerSector;
-
         if (lseek(fd, offset, SEEK_SET) < 0) {
             perror("Error seeking to write new file entry");
         } else if (write(fd, buffer, bsi->bytesPerSector * bsi->sectorsPerCluster) < 0) {
@@ -342,14 +360,13 @@ void createFile(int fd, const char* fileName, DirectoryContext* context, BootSec
     free(buffer);
 }
 
-
+//function to handle rm
 void removeFile(int fd, const char* fileName, DirectoryContext* context, BootSectorInfo* bsi) {
     unsigned char* buffer = malloc(bsi->bytesPerSector * bsi->sectorsPerCluster);
     if (!buffer) {
         printf("Failed to allocate memory for directory cluster\n");
         return;
     }
-
     if (!readCluster(fd, context->currentCluster, buffer, bsi)) {
         free(buffer);
         return;
@@ -359,32 +376,35 @@ void removeFile(int fd, const char* fileName, DirectoryContext* context, BootSec
     int numEntries = (bsi->bytesPerSector * bsi->sectorsPerCluster) / sizeof(DirEntry);
     bool fileFound = false;
 
+    //search for entry to delete
     for (int i = 0; i < numEntries; i++) {
         if (entries[i].name[0] == 0x00) {
-            break; // End of directory entries
+            break; 
         }
 
         if ((unsigned char)entries[i].name[0] == 0xE5) {
-            continue; // Skip deleted entries
+            continue; 
         }
 
         char formattedName[12];
         strncpy(formattedName, entries[i].name, 11);
         formattedName[11] = '\0';
 
-        // Remove trailing spaces from filename for comparison
+        //remove trailing spaces from filename
         for (int j = 10; j >= 0; j--) {
             if (formattedName[j] == ' ') formattedName[j] = '\0';
             else break;
         }
 
+        //mark the deleted entry as deleted
         if (strcmp(formattedName, fileName) == 0) {
-            entries[i].name[0] = 0xE5; // Mark the entry as deleted
+            entries[i].name[0] = 0xE5; 
             fileFound = true;
             break;
         }
     }
 
+    //if the file is found, calculate offset and print message
     if (fileFound) {
         off_t offset = (context->currentCluster - 2) * bsi->sectorsPerCluster * bsi->bytesPerSector + bsi->rootCluster * bsi->bytesPerSector;
         if (lseek(fd, offset, SEEK_SET) < 0) {
@@ -401,18 +421,17 @@ void removeFile(int fd, const char* fileName, DirectoryContext* context, BootSec
     free(buffer);
 }
 
+//function to handle rmdir
 void removeDirectory(int fd, const char* dirName, DirectoryContext* context, BootSectorInfo* bsi) {
     if (strcmp(dirName, ".") == 0 || strcmp(dirName, "..") == 0) {
         printf("Error: Cannot remove '.' or '..'\n");
         return;
     }
-
     unsigned char* buffer = malloc(bsi->bytesPerSector * bsi->sectorsPerCluster);
     if (!buffer) {
         printf("Failed to allocate memory for directory cluster\n");
         return;
     }
-
     if (!readCluster(fd, context->currentCluster, buffer, bsi)) {
         free(buffer);
         return;
@@ -423,20 +442,19 @@ void removeDirectory(int fd, const char* dirName, DirectoryContext* context, Boo
     bool found = false;
     bool isEmpty = true;
 
-    // First pass: check existence and emptiness
+    //search for directory with formatted name, ignore deleted directories
     for (int i = 0; i < numEntries; i++) {
         if (entries[i].name[0] == 0x00) {
-            break; // End of directory entries
+            break; 
         }
         if ((unsigned char)entries[i].name[0] == 0xE5) {
-            continue; // Skip deleted entries
+            continue; 
         }
-
         char formattedName[12];
         strncpy(formattedName, entries[i].name, 11);
         formattedName[11] = '\0';
 
-        // Remove trailing spaces from filename for comparison
+        //remove trailing spaces from filename
         for (int j = 10; j >= 0; j--) {
             if (formattedName[j] == ' ') formattedName[j] = '\0';
             else break;
@@ -445,30 +463,30 @@ void removeDirectory(int fd, const char* dirName, DirectoryContext* context, Boo
         if (strcmp(formattedName, dirName) == 0 && (entries[i].attr & ATTR_DIRECTORY)) {
             found = true;
 
-            // Check if the directory is empty by attempting to read its cluster
+            //check if the directory is empty by attempting to read its cluster
             unsigned int dirCluster = (entries[i].firstClusterHigh << 16) | entries[i].firstClusterLow;
             unsigned char* dirBuffer = malloc(bsi->bytesPerSector * bsi->sectorsPerCluster);
             if (!dirBuffer || !readCluster(fd, dirCluster, dirBuffer, bsi)) {
-                isEmpty = false; // Assume not empty if we fail to read
+                isEmpty = false; 
             } else {
                 DirEntry* dirEntries = (DirEntry*)dirBuffer;
                 for (int j = 0; j < numEntries; j++) {
                     if (dirEntries[j].name[0] == 0x00) {
-                        break; // End of directory entries
+                        break; 
                     }
                     if ((unsigned char)dirEntries[j].name[0] == 0xE5) {
-                        continue; // Skip deleted entries
+                        continue; 
                     }
-                    if (j > 1) { // More than just '.' and '..'
+                    if (j > 1) { 
                         isEmpty = false;
                         break;
                     }
                 }
             }
             free(dirBuffer);
-
+            //mark the directory as deleted
             if (isEmpty) {
-                entries[i].name[0] = 0xE5; // Mark the directory as deleted
+                entries[i].name[0] = 0xE5; 
             }
             break;
         }
@@ -479,7 +497,7 @@ void removeDirectory(int fd, const char* dirName, DirectoryContext* context, Boo
     } else if (!isEmpty) {
         printf("Error: Directory is not empty or could not be read.\n");
     } else {
-        // Write back the updated buffer to the current directory's cluster
+        //write back the updated buffer to the current directory's cluster
         off_t offset = ((context->currentCluster - 2) * bsi->sectorsPerCluster + bsi->rootCluster) * bsi->bytesPerSector;
         if (lseek(fd, offset, SEEK_SET) < 0) {
             perror("Error seeking to update directory");
@@ -499,8 +517,9 @@ void initializeOpenFiles() {
     }
 }
 
+//function to handle opening a file
 void openFile(int fd, const char* fileName, const char* mode, DirectoryContext* context, BootSectorInfo* bsi) {
-    // Check if file is already open
+    //check if file is already open
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
         if (openFiles[i].isOpen && strcmp(openFiles[i].fileName, fileName) == 0) {
             printf("Error: File is already opened.\n");
@@ -508,7 +527,7 @@ void openFile(int fd, const char* fileName, const char* mode, DirectoryContext* 
         }
     }
 
-    // Find an empty slot
+    //find an empty slot
     int index = -1;
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
         if (!openFiles[i].isOpen) {
@@ -522,7 +541,7 @@ void openFile(int fd, const char* fileName, const char* mode, DirectoryContext* 
         return;
     }
 
-    // Set flags based on mode
+    //set flags based on mode
     int flags = -1;
     if (strcmp(mode, "-r") == 0) flags = 0;
     else if (strcmp(mode, "-w") == 0) flags = 1;
@@ -533,7 +552,7 @@ void openFile(int fd, const char* fileName, const char* mode, DirectoryContext* 
         return;
     }
 
-    // Find the file in the directory
+    //find the file in the directory
     unsigned char* buffer = malloc(bsi->bytesPerSector * bsi->sectorsPerCluster);
     if (!buffer) {
         printf("Failed to allocate memory for reading cluster\n");
@@ -548,9 +567,10 @@ void openFile(int fd, const char* fileName, const char* mode, DirectoryContext* 
     int entriesCount = (bsi->bytesPerSector * bsi->sectorsPerCluster) / sizeof(DirEntry);
     bool found = false;
 
+    //format the name and search for the correct entry
     for (int i = 0; i < entriesCount; i++, entry++) {
-        if (entry->name[0] == 0x00) break; // End of the directory entries
-        if ((unsigned char)entry->name[0] == 0xE5) continue; // Skip deleted entries
+        if (entry->name[0] == 0x00) break; 
+        if ((unsigned char)entry->name[0] == 0xE5) continue; 
 
         char formattedName[12];
         strncpy(formattedName, entry->name, 11);
@@ -573,6 +593,7 @@ void openFile(int fd, const char* fileName, const char* mode, DirectoryContext* 
         }
     }
 
+    //print message indicating success or failure
     if (!found) {
         printf("Error: File not found.\n");
     } else {
@@ -582,12 +603,13 @@ void openFile(int fd, const char* fileName, const char* mode, DirectoryContext* 
     free(buffer);
 }
 
+//function to handles closing of a file
 void closeFile(const char* fileName) {
     bool fileFound = false;
-
+    //search for files in the list of open files and if found, close it
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
         if (openFiles[i].isOpen && strcmp(openFiles[i].fileName, fileName) == 0) {
-            openFiles[i].isOpen = false; // Mark the file as closed
+            openFiles[i].isOpen = false; 
             printf("File closed successfully: %s\n", fileName);
             fileFound = true;
             break;
@@ -599,6 +621,7 @@ void closeFile(const char* fileName) {
     }
 }
 
+//function to list all open files
 void listOpenFiles(DirectoryContext* context) {
     bool anyFileOpen = false;
     printf("Opened Files:\n");
@@ -622,6 +645,7 @@ void listOpenFiles(DirectoryContext* context) {
     }
 }
 
+//seek the offset of the file
 void seekFile(const char* fileName, unsigned long newOffset) {
     bool fileFound = false;
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
@@ -642,6 +666,7 @@ void seekFile(const char* fileName, unsigned long newOffset) {
     }
 }
 
+//function to handle reading of a file
 void readFile(int fd, const char* fileName, unsigned int size, BootSectorInfo* bsi) {
     bool fileFound = false;
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
@@ -661,12 +686,13 @@ void readFile(int fd, const char* fileName, unsigned int size, BootSectorInfo* b
                 readSize = openFiles[i].size - openFiles[i].offset;
             }
 
-            // Calculate starting sector and offset within the sector
+            //calculate starting sector and offset within the sector
             unsigned int cluster = openFiles[i].cluster;
             unsigned int sectorOffset = (openFiles[i].offset / bsi->bytesPerSector) % bsi->sectorsPerCluster;
             unsigned int byteOffset = openFiles[i].offset % bsi->bytesPerSector;
             unsigned int bytesRead = 0;
 
+            //seek file and attempt tor read - calculate te number of bytes needed to read
             while (bytesRead < readSize) {
                 unsigned long long sector = ((cluster - 2) * bsi->sectorsPerCluster) + bsi->rootCluster + sectorOffset;
                 off_t sectorStart = sector * bsi->bytesPerSector;
@@ -688,20 +714,20 @@ void readFile(int fd, const char* fileName, unsigned int size, BootSectorInfo* b
                     return;
                 }
 
+                //reset byte offset for the next secto
                 bytesRead += bytesToRead;
-                byteOffset = 0;  // Reset byte offset for the next sector
+                byteOffset = 0;
                 sectorOffset++;
                 if (sectorOffset >= bsi->sectorsPerCluster) {
                     sectorOffset = 0;
-                    // Assuming a simple FAT chain lookup function that gets the next cluster
                     cluster = getNextCluster(fd, cluster, bsi);
                 }
             }
 
-            printf("%.*s", bytesRead, buffer);  // Print the read data
+            printf("%.*s", bytesRead, buffer); 
             free(buffer);
 
-            // Update offset
+            //update offset
             openFiles[i].offset += bytesRead;
             printf("\nRead %u bytes from file: %s\n", bytesRead, fileName);
             break;
@@ -713,45 +739,46 @@ void readFile(int fd, const char* fileName, unsigned int size, BootSectorInfo* b
     }
 }
 
+//fucntion to handle finidng of the next cluster
 unsigned int getNextCluster(int fd, unsigned int currentCluster, BootSectorInfo* bsi) {
     if (currentCluster < 2) {
         fprintf(stderr, "Invalid cluster number: %u\n", currentCluster);
-        return 0xFFFFFFFF;  // Indicates an error or end of cluster chain
+        return 0xFFFFFFFF; //error
     }
 
-    // FAT32 cluster entry is 4 bytes
+    //FAT32 cluster entry is 4 bytes
     unsigned int fatOffset = currentCluster * 4;
     unsigned int fatSector = bsi->rootCluster + (fatOffset / bsi->bytesPerSector);
     unsigned int entOffset = fatOffset % bsi->bytesPerSector;
 
-    // Buffer to read the entry from FAT
-    unsigned char buffer[4];  // FAT32 entries are 4 bytes
+    //buffer to read the entry
+    unsigned char buffer[4]; 
 
-    // Calculate the position to seek to in the FAT
+    //calculate the position to seek
     off_t position = fatSector * bsi->bytesPerSector + entOffset;
 
     if (lseek(fd, position, SEEK_SET) < 0) {
         perror("Error seeking in FAT");
-        return 0xFFFFFFFF;  // Indicates an error or end of cluster chain
+        return 0xFFFFFFFF;  
     }
 
-    // Read the next cluster value from the FAT
+    //read the next cluster value
     if (read(fd, buffer, 4) != 4) {
         perror("Error reading FAT entry");
-        return 0xFFFFFFFF;  // Indicates an error or end of cluster chain
+        return 0xFFFFFFFF;
     }
 
-    // Calculate next cluster from the entry
-    unsigned int nextCluster = *(unsigned int*)buffer & 0x0FFFFFFF;  // Mask to lower 28 bits
+    //calculate next cluster from the entry
+    unsigned int nextCluster = *(unsigned int*)buffer & 0x0FFFFFFF; 
 
-    // End of cluster chain markers for FAT32
+    //end of cluster chain markers
     if (nextCluster >= 0x0FFFFFF8) {
-        return 0xFFFFFFFF;  // End of chain
+        return 0xFFFFFFFF; 
     }
-
     return nextCluster;
 }
 
+//fucntion to handle writing to file NOT WORKING we tried :(
 void writeFile(int fd, const char* fileName, const char* data, BootSectorInfo* bsi) {
     int i;
     for (i = 0; i < MAX_OPEN_FILES; i++) {
@@ -764,12 +791,12 @@ void writeFile(int fd, const char* fileName, const char* data, BootSectorInfo* b
             unsigned int dataSize = strlen(data);
             unsigned int newOffset = openFiles[i].offset + dataSize;
 
-            // Check if the offset exceeds the file size and adjust file size if needed
+            //check if the offset exceeds the file size and adjust file size 
             if (newOffset > openFiles[i].size) {
-                openFiles[i].size = newOffset;  // Update file size to accommodate new data
+                openFiles[i].size = newOffset;  
             }
 
-            // Writing data to file starting at the current offset
+            //writing data to file starting at the current offset
             unsigned int cluster = openFiles[i].cluster;
             unsigned int sectorOffset = (openFiles[i].offset / bsi->bytesPerSector) % bsi->sectorsPerCluster;
             unsigned int byteOffset = openFiles[i].offset % bsi->bytesPerSector;
@@ -794,8 +821,9 @@ void writeFile(int fd, const char* fileName, const char* data, BootSectorInfo* b
                     return;
                 }
 
+                //reset byte offset for the next sector
                 bytesWritten += bytesToWrite;
-                byteOffset = 0;  // Reset byte offset for the next sector
+                byteOffset = 0; 
                 sectorOffset++;
                 if (sectorOffset >= bsi->sectorsPerCluster) {
                     sectorOffset = 0;
@@ -807,7 +835,7 @@ void writeFile(int fd, const char* fileName, const char* data, BootSectorInfo* b
                 }
             }
 
-            openFiles[i].offset = newOffset;  // Update file offset after writing
+            openFiles[i].offset = newOffset;
             printf("Data written successfully to file: %s\n", fileName);
             break;
         }
@@ -818,7 +846,7 @@ void writeFile(int fd, const char* fileName, const char* data, BootSectorInfo* b
     }
 }
 
-
+//main
 int main(int argc, char *argv[]) {
     if (argc != 2) {
         printf("Usage: ./filesys [FAT32 ISO]\n");
@@ -831,7 +859,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Read the boot sector to initialize the BootSectorInfo
+    //read the boot sector to initialize the BootSectorInfo
     unsigned char bootSector[512];
     if (read(fd, bootSector, sizeof(bootSector)) != sizeof(bootSector)) {
         perror("Failed to read boot sector");
@@ -839,42 +867,47 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    //initialize the boot sector info
     BootSectorInfo bsi = {
         .bytesPerSector = *(unsigned short *)(bootSector + 11),
         .sectorsPerCluster = *(bootSector + 13),
         .rootCluster = *(unsigned int *)(bootSector + 44),
         .sectorsPerFAT = *(unsigned int *)(bootSector + 36),
-        .sizeOfImage = lseek(fd, 0, SEEK_END) // Fetch the size of the image by seeking to the end
+        .sizeOfImage = lseek(fd, 0, SEEK_END) 
     };
     bsi.totalClusters = (bsi.sizeOfImage / (bsi.sectorsPerCluster * bsi.bytesPerSector));
 
-    lseek(fd, 0, SEEK_SET); // Reset the file descriptor position for further operations
+    //reset the file descriptor position for further operations
+    lseek(fd, 0, SEEK_SET); 
 
-    DirectoryContext context = {2, "/", ""}; // Initialize the context
-    strncpy(context.imageName, argv[1], sizeof(context.imageName) - 1); // Store the image file name
-    context.imageName[sizeof(context.imageName) - 1] = '\0'; // Ensure null-termination
+    //initialize the directory context
+    DirectoryContext context = {2, "/", ""}; 
+    strncpy(context.imageName, argv[1], sizeof(context.imageName) - 1); 
+    context.imageName[sizeof(context.imageName) - 1] = '\0'; 
 
     char command[256];
+    //initialize infinite loop of the prompt
     while (1) {
-        printf("[%s%s]/> ", context.imageName, context.path); // Display both image name and path
+        printf("[%s%s]/> ", context.imageName, context.path); 
         if (!fgets(command, sizeof(command), stdin)) {
-            break; // Exit on EOF
+            break; 
         }
-        command[strcspn(command, "\n")] = 0; // Remove newline character
+        command[strcspn(command, "\n")] = 0; 
 
+        //if statement to handle the different required commands for the system
         if (strcmp(command, "exit") == 0) {
             break;
         } else if (strcmp(command, "info") == 0) {
             printBootSectorInfo(argv[1]);
         } else if (strncmp(command, "cd ", 3) == 0) {
             char dirName[256];
-            sscanf(command + 3, "%s", dirName); // Assuming directory names don't contain spaces
+            sscanf(command + 3, "%s", dirName); 
             changeDirectory(fd, dirName, &context, &bsi);
         } else if (strcmp(command, "ls") == 0) {
             listDirectory(fd, &context, &bsi);
         } else if (strncmp(command, "mkdir ", 6) == 0) {
             char dirName[256];
-            sscanf(command + 6, "%255s", dirName); // Extract directory name from command
+            sscanf(command + 6, "%255s", dirName);
             createDirectory(fd, dirName, &context, &bsi);
         } else if (strncmp(command, "creat ", 6) == 0) {
             char filename[256];
@@ -916,7 +949,7 @@ int main(int argc, char *argv[]) {
     	    }
 	} else if (strncmp(command, "write ", 6) == 0) {
     	    char fileName[256];
-    	    char data[1024];  // Assuming a maximum write size for simplicity
+    	    char data[1024]; 
     	  if (sscanf(command + 6, "%s \"%1023[^\"]\"", fileName, data) == 2) {
             writeFile(fd, fileName, data, &bsi);
     	  } else {
