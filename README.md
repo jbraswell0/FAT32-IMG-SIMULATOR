@@ -1,4 +1,6 @@
-Project 3: Division of Labor (AFTER) Operating Systems team members:
+# Project 3
+
+Division of Labor (AFTER) Operating Systems team members:
 
 1. Jacob Proenza-Smith
 2. Elliot Beaver
@@ -45,4 +47,3 @@ Run the 'make' command in the terminal. This will create the executable called '
 Bugs:
 
 Currently, the writeFile function does not work. You can execute the command, but it will always fail. 
-
